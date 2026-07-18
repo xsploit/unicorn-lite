@@ -190,6 +190,36 @@ Natural Questions, TriviaQA, and WebQuestions may warm-start factual passage
 retrieval. They are not substitutes for Discord data when learning callbacks,
 relationships, conversation state, or when to remain silent.
 
+## 8. From proxy reranking to Discord-scale EMDR2
+
+The accepted proxy reranker established that answer-aware memory ordering could
+change writer context without changing speech decisions. The next version
+implements the paper's shared-reader objective instead of predicting only a reply
+embedding.
+
+Two trainable MiniLM encoders score the current message against causal Discord
+memories. FLAN-T5-small independently encodes the selected memories, concatenates
+their token states for one FiD-style reply loss, and reuses the same parameters to
+measure the historical reply likelihood under every individual memory. The
+individual likelihoods are detached before Equation 6's retriever term.
+
+The first seed-53 run completed on the 16 GB RTX 5060 Ti with 829 training groups,
+two epochs, top-K 4, and a refreshed pool of 24. On 48 held-out comparisons the
+learned top memory gained 9.285 answer log-likelihood over the initial retriever
+and won 69.79 percent of comparisons. The reader itself remains experimental;
+only the retriever was accepted.
+
+Runtime promotion preserved the architectural firewall:
+
+```text
+ponder gate -> SILENCE: no EMDR2 and no writer
+            -> REPLY: learned all-event memory index -> optional Vercel prose
+```
+
+Preflight on transactional live-database backups reported exactly zero action,
+confidence, or neural-surprise drift, no writer call, and 3.67 ms learned
+retrieval latency across 1,941 indexed events.
+
 ## Reproducibility and privacy boundary
 
 Source, tests, training utilities, and aggregate measurements are published. Raw

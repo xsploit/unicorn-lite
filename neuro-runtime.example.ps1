@@ -51,6 +51,7 @@ $arguments = @(
     '--device', 'cuda',
     '--db', '.\data\neuro-live.db',
     '--gate-checkpoint', '.\data\response-gate.pt',
+    '--emdr2-checkpoint', '.\data\discord-emdr2-v1',
     '--gate-threshold-override', "$ConversationChannelId=0.28",
     '--allow-unsolicited',
     '--unsolicited-channel-id', $ConversationChannelId,

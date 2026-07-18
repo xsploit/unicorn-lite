@@ -368,5 +368,19 @@ class MemoryStore:
     def event_count(self) -> int:
         return int(self.connection.execute("SELECT COUNT(*) FROM events").fetchone()[0])
 
+    def memory_records(self) -> list[dict[str, Any]]:
+        """Return canonical event text and provenance for learned index refreshes."""
+        rows = self.connection.execute(
+            """
+            SELECT e.event_id, e.content, e.actor, e.occurred_at,
+                   (SELECT d.action FROM decisions d
+                    WHERE d.event_id=e.event_id
+                    ORDER BY d.id DESC LIMIT 1) AS decision_action
+            FROM events e
+            ORDER BY e.occurred_at, e.event_id
+            """
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def close(self) -> None:
         self.connection.close()

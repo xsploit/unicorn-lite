@@ -505,6 +505,23 @@ EMDR2 literally would require differentiating through the reader; that is not
 possible with the current black-box Vercel writer and is unnecessary for the
 first reranker experiment.
 
+The second experiment now implements the paper's shared-reader objective locally.
+Separate trainable MiniLM query/document encoders retrieve Discord memories. One
+FLAN-T5-small reader trains on the fused top-K memory set and also scores the gold
+reply against each memory individually. Those individual likelihoods are stopped
+before the retriever term, so answer usefulness trains the retriever without
+turning the reader into an easier teacher. Vercel remains outside the graph and
+is only the optional final prose renderer.
+
+The first complete run trained 829 chronological groups and held out 208. Across
+48 acceptance comparisons, learned top-1 retrieval improved gold-reply log
+likelihood by 9.285 and beat the untouched retriever 69.79 percent of the time.
+The shared reader reached 3.864 NLL. A transactional live preflight indexed 1,941
+memories, changed the selected top five, averaged 3.67 ms per retrieval, preserved
+the gate decision/confidence and neural surprise exactly, and made no writer call.
+See [the Discord-scale EMDR2 experiment](docs/EMDR2_EXPERIMENT.md) for the
+reproduction commands and deployment boundary.
+
 External data can be converted and evaluated without asking an LLM for JSON:
 
 ```powershell

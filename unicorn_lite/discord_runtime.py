@@ -100,12 +100,17 @@ def decision_audit_payload(
             "discord_reply_sent": discord_reply_sent,
             "discord_send_error": discord_send_error,
             "memory_selector": (
-                "answer-aware-v1"
-                if agent.memory_reranker is not None
-                else "cosine-top5"
+                "discord-emdr2-v1"
+                if getattr(agent, "emdr2_retriever", None) is not None
+                else (
+                    "answer-aware-v1"
+                    if agent.memory_reranker is not None
+                    else "cosine-top5"
+                )
             ),
             "memory_selector_applied": bool(
-                event.metadata.get("memory_reranker", {}).get("applied")
+                event.metadata.get("emdr2", {}).get("applied")
+                or event.metadata.get("memory_reranker", {}).get("applied")
             ),
             "memory_candidate_limit": agent.memory_candidate_limit,
         },
@@ -339,6 +344,7 @@ def run_discord(
                 )
                 gate_signals = metadata.get("gate_memory_signals", {})
                 reranker = metadata.get("memory_reranker")
+                emdr2 = metadata.get("emdr2")
                 reranker_applied = isinstance(reranker, dict) and reranker.get("applied")
                 memory_lines = (
                     f"cosine **{float(gate_signals.get('max_memory_similarity', 0)):.3f}** · "
@@ -353,6 +359,11 @@ def run_discord(
                         f"\n{int(reranker.get('candidates', 0))}→{len(result.memories)} · "
                         f"top weight **{(max(selected_probabilities) if selected_probabilities else 0) * 100:.1f}%** · "
                         f"changed {'✓' if reranker.get('changed_top5') else '–'}"
+                    )
+                elif isinstance(emdr2, dict) and emdr2.get("applied"):
+                    memory_lines += (
+                        f"\nEMDR² index **{int(emdr2.get('indexed_memories', 0))}** · "
+                        f"changed {'✓' if emdr2.get('changed_top5') else '–'}"
                     )
                 else:
                     memory_lines += "\nselector gated off"

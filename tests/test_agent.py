@@ -4,6 +4,7 @@ import asyncio
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import torch
@@ -11,7 +12,7 @@ import torch
 from unicorn_lite.agent import UnicornAgent
 from unicorn_lite.encoder import HashEncoder, encoder_identity
 from unicorn_lite.memory_reranker import AnswerAwareMemoryReranker
-from unicorn_lite.models import Experience
+from unicorn_lite.models import Experience, MemoryHit
 from unicorn_lite.writer import WriterUnavailable
 
 
@@ -29,6 +30,31 @@ class CountingWriter:
         self.calls += 1
         self.memories = list(kwargs.get("memories", []))
         return "called"
+
+
+class FakeEMDR2Retriever:
+    def __init__(self, *_: object, **__: object) -> None:
+        self.metadata = {"architecture": "discord_emdr2_v1"}
+        self.records: list[dict[str, object]] = []
+
+    def refresh(self, records: list[dict[str, object]]) -> None:
+        self.records = list(records)
+
+    def add(self, record: dict[str, object]) -> None:
+        self.records.append(record)
+
+    def retrieve(self, _: str, limit: int = 5) -> list[MemoryHit]:
+        return [
+            MemoryHit(
+                event_id=str(record["event_id"]),
+                content=str(record["content"]),
+                actor=str(record["actor"]),
+                similarity=0.9 - index * 0.01,
+                occurred_at=str(record["occurred_at"]),
+                decision_action=str(record.get("decision_action") or "OBSERVE"),
+            )
+            for index, record in enumerate(reversed(self.records[-limit:]))
+        ]
 
 
 class AgentTests(unittest.TestCase):
@@ -130,6 +156,32 @@ class AgentTests(unittest.TestCase):
             self.assertEqual(probabilities, sorted(probabilities, reverse=True))
             self.assertEqual(writer.calls, 1)
             self.assertEqual(len(writer.memories), 5)
+            agent.close()
+
+    def test_emdr2_index_runs_only_after_reply_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "unicorn_lite.agent.EMDR2RuntimeRetriever", FakeEMDR2Retriever
+        ):
+            writer = CountingWriter()
+            agent = UnicornAgent(
+                Path(directory) / "agent.db",
+                HashEncoder(),
+                device="cpu",
+                writer=writer,  # type: ignore[arg-type]
+                emdr2_checkpoint="fake-directory",
+            )
+            for index in range(6):
+                event = Experience(f"background {index}")
+                asyncio.run(agent.ingest(event))
+                self.assertNotIn("emdr2", event.metadata)
+            direct = Experience("answer this", metadata={"direct": True})
+            result = asyncio.run(agent.ingest(direct, allow_writer=True))
+            self.assertEqual(result.decision.action, "REPLY_FLASH")
+            self.assertTrue(direct.metadata["emdr2"]["applied"])
+            self.assertEqual(direct.metadata["emdr2"]["indexed_memories"], 6)
+            self.assertEqual(writer.calls, 1)
+            self.assertEqual(len(writer.memories), 5)
+            self.assertEqual(len(agent.emdr2_retriever.records), 7)
             agent.close()
 
 

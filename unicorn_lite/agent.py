@@ -6,6 +6,7 @@ import numpy as np
 import torch
 
 from .core import NeuralCore
+from .emdr2 import EMDR2RuntimeRetriever
 from .encoder import Encoder, encoder_identity
 from .facts import extract_and_store
 from .memory_reranker import reranker_from_checkpoint
@@ -26,7 +27,10 @@ class UnicornAgent:
         policy: CostAwarePolicy | None = None,
         checkpoint: str | None = None,
         memory_reranker_checkpoint: str | None = None,
+        emdr2_checkpoint: str | None = None,
     ) -> None:
+        if memory_reranker_checkpoint and emdr2_checkpoint:
+            raise ValueError("select either the proxy reranker or EMDR2, not both")
         self.store = MemoryStore(db_path)
         self.encoder = encoder
         self.core = NeuralCore(
@@ -42,6 +46,7 @@ class UnicornAgent:
         self.policy = policy or CostAwarePolicy()
         self.writer = writer
         self.memory_reranker = None
+        self.emdr2_retriever = None
         self.memory_candidate_limit = 5
         if memory_reranker_checkpoint:
             reranker_checkpoint = torch.load(
@@ -57,6 +62,11 @@ class UnicornAgent:
             self.memory_candidate_limit = int(
                 reranker_checkpoint.get("candidate_limit", 20)
             )
+        if emdr2_checkpoint:
+            self.emdr2_retriever = EMDR2RuntimeRetriever(
+                emdr2_checkpoint, device=device
+            )
+            self.emdr2_retriever.refresh(self.store.memory_records())
 
     async def ingest(self, event: Experience, allow_writer: bool = False) -> AgentResult:
         embedding = self.encoder.encode(event.content)
@@ -94,6 +104,27 @@ class UnicornAgent:
                 "changed_top5": [hit.event_id for hit in memories]
                 != [hit.event_id for hit in candidates[:5]],
             }
+        elif decision.action.startswith("REPLY") and self.emdr2_retriever is not None:
+            memories = self.emdr2_retriever.retrieve(event.content, limit=5)
+            event.metadata["emdr2"] = {
+                "applied": True,
+                "architecture": self.emdr2_retriever.metadata["architecture"],
+                "indexed_memories": len(self.emdr2_retriever.records),
+                "cosine_event_ids": [hit.event_id for hit in policy_memories],
+                "selected_event_ids": [hit.event_id for hit in memories],
+                "changed_top5": [hit.event_id for hit in memories]
+                != [hit.event_id for hit in policy_memories],
+            }
+        if self.emdr2_retriever is not None:
+            self.emdr2_retriever.add(
+                {
+                    "event_id": event.event_id,
+                    "content": event.content,
+                    "actor": event.actor,
+                    "occurred_at": event.occurred_at,
+                    "decision_action": decision.action,
+                }
+            )
         # The learned policy adds memory and ponder diagnostics to metadata.
         # Store them after the decision so live failures remain trainable from
         # the canonical event ledger instead of only from Discord audit files.

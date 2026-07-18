@@ -82,6 +82,7 @@ def _agent(args: argparse.Namespace) -> UnicornAgent:
         memory_reranker_checkpoint=getattr(
             args, "memory_reranker_checkpoint", None
         ),
+        emdr2_checkpoint=getattr(args, "emdr2_checkpoint", None),
     )
     if getattr(args, "command", None) == "discord":
         gate_checkpoint = Path(args.gate_checkpoint)
@@ -395,6 +396,13 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "accepted answer-aware reranker; applied only after the local gate "
             "selects REPLY"
+        ),
+    )
+    discord_parser.add_argument(
+        "--emdr2-checkpoint",
+        help=(
+            "accepted Discord-scale EMDR2 directory; its learned retriever "
+            "runs only after the local speech gate selects REPLY"
         ),
     )
     discord_parser.add_argument(
