@@ -78,8 +78,11 @@ class UnicornAgent:
             event.metadata["memory_reranker"] = {
                 "applied": True,
                 "candidates": len(candidates),
+                "cosine_event_ids": [hit.event_id for hit in candidates[:5]],
                 "selected_event_ids": [hit.event_id for hit in memories],
                 "selected_scores": [float(scores[index]) for index in order[:5]],
+                "changed_top5": [hit.event_id for hit in memories]
+                != [hit.event_id for hit in candidates[:5]],
             }
         # The learned policy adds memory and ponder diagnostics to metadata.
         # Store them after the decision so live failures remain trainable from

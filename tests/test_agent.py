@@ -120,6 +120,8 @@ class AgentTests(unittest.TestCase):
             result = asyncio.run(agent.ingest(event, allow_writer=True))
             self.assertEqual(result.decision.action, "REPLY_FLASH")
             self.assertTrue(event.metadata["memory_reranker"]["applied"])
+            self.assertIn("cosine_event_ids", event.metadata["memory_reranker"])
+            self.assertIn("changed_top5", event.metadata["memory_reranker"])
             self.assertEqual(writer.calls, 1)
             self.assertEqual(len(writer.memories), 5)
             agent.close()

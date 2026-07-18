@@ -58,7 +58,10 @@ An all-reply first attempt failed its held-out acceptance test. Adding an
 answer-aware latent-memory posterior and filtering for genuinely memory-dependent
 interactions produced stable gains across three seeds. The checkpoint remains
 opt-in and affects only memory ordering after the response gate has already chosen
-to speak. Shadow comparison is required before live promotion.
+to speak. A transactionally backed-up live-database preflight confirmed zero gate
+decision/confidence drift, no writer call, changed memory ordering, and about
+1.02 ms isolated selector latency before the accepted seed-7 checkpoint was
+promoted.
 
 Build and train locally:
 
@@ -78,3 +81,11 @@ py -3.10 .\scripts\train_memory_reranker.py `
 An accepted checkpoint can be evaluated in a Discord runtime with
 `--memory-reranker-checkpoint`. It cannot influence the response gate: the
 reranker executes only after the decision action begins with `REPLY`.
+
+Preflight against a safe SQLite backup before promotion:
+
+```powershell
+py -3.10 .\scripts\preflight_memory_reranker.py `
+  .\data\live.db .\data\answer-aware-memory-reranker.pt `
+  --core-checkpoint .\data\controller.pt --encoder local --device cuda
+```

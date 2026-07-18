@@ -356,6 +356,22 @@ def run_discord(
                     ),
                     inline=True,
                 )
+                reranker = metadata.get("memory_reranker")
+                if isinstance(reranker, dict) and reranker.get("applied"):
+                    selected_scores = [
+                        float(value) for value in reranker.get("selected_scores", [])
+                    ]
+                    embed.add_field(
+                        name="Answer-aware memory",
+                        value=(
+                            f"Candidates: **{int(reranker.get('candidates', 0))}**\n"
+                            f"Changed cosine top 5: **"
+                            f"{bool(reranker.get('changed_top5'))}**\n"
+                            f"Top selector score: **"
+                            f"{(max(selected_scores) if selected_scores else 0):.3f}**"
+                        ),
+                        inline=True,
+                    )
                 embed.set_footer(text=f"event {event.event_id} · full metadata attached")
                 encoded = json.dumps(
                     payload, ensure_ascii=False, indent=2, default=str

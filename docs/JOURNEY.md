@@ -160,11 +160,17 @@ Three independent seeds all beat cosine retrieval:
 | Oracle-memory MRR | 0.236 | 0.361-0.380 |
 | Predicted reply cosine | query-only 0.320 | 0.354-0.375 |
 
-The selector is now available behind an optional accepted-checkpoint flag. It
-runs only after the existing local gate chooses REPLY, so it cannot increase the
-writer-call rate or turn a silent message into speech. The live bot remains on the
-cosine retriever until a shadow attribution comparison checks actual selected
-memories, latency, and rendered-reply regressions.
+The selector is available behind an accepted-checkpoint flag and runs only after
+the existing local gate chooses REPLY, so it cannot increase writer-call rate or
+turn a silent message into speech. Before live promotion it was run against two
+transactional backups of the live database. Baseline and challenger produced the
+same action, confidence, and neural surprise; no writer was called; the reranker
+changed the cosine top five; and the isolated selector averaged about 1.02 ms.
+
+The accepted seed-7 checkpoint was then promoted to the active bot. Discord audit
+metadata reports candidate count, whether the selected top five changed, and the
+top selector score. Rollback is removing the optional checkpoint argument; the
+speech gate, threshold, event ledger, and original cosine vectors are unchanged.
 
 Natural Questions, TriviaQA, and WebQuestions may warm-start factual passage
 retrieval. They are not substitutes for Discord data when learning callbacks,
