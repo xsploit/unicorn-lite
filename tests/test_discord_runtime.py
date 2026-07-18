@@ -11,6 +11,8 @@ from unicorn_lite.discord_runtime import (
     is_alias_role_mentioned,
     is_lexically_addressed,
     is_speech_eligible,
+    is_trusted_bot,
+    is_trusted_webhook,
 )
 from unicorn_lite.models import Decision, Experience, MemoryHit
 
@@ -31,6 +33,17 @@ class DiscordRuntimeTests(unittest.TestCase):
         self.assertTrue(is_alias_role_mentioned(["Neuro-sama"], aliases))
         self.assertTrue(is_alias_role_mentioned(["neuro sama"], aliases))
         self.assertFalse(is_alias_role_mentioned(["AI bots"], aliases))
+
+    def test_only_explicitly_allowlisted_webhook_is_trusted(self) -> None:
+        trusted = {"webhook-1"}
+        self.assertTrue(is_trusted_webhook("webhook-1", trusted))
+        self.assertFalse(is_trusted_webhook("webhook-2", trusted))
+        self.assertFalse(is_trusted_webhook(None, trusted))
+
+    def test_only_explicitly_allowlisted_bot_is_trusted(self) -> None:
+        trusted = {"bot-1"}
+        self.assertTrue(is_trusted_bot("bot-1", trusted))
+        self.assertFalse(is_trusted_bot("bot-2", trusted))
 
     def test_directed_messages_are_eligible_in_any_channel(self) -> None:
         common = {

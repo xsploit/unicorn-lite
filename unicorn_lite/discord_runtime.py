@@ -49,6 +49,16 @@ def is_alias_role_mentioned(role_names: list[str], aliases: set[str]) -> bool:
     return any(_normalized_alias(name) in normalized_aliases for name in role_names)
 
 
+def is_trusted_webhook(
+    webhook_id: str | None, trusted_webhook_ids: set[str]
+) -> bool:
+    return bool(webhook_id and webhook_id in trusted_webhook_ids)
+
+
+def is_trusted_bot(actor_id: str, trusted_bot_ids: set[str]) -> bool:
+    return actor_id in trusted_bot_ids
+
+
 def is_speech_eligible(
     *,
     mode: str,
@@ -177,6 +187,16 @@ def run_discord(
     intents.message_content = True
     client = discord.Client(intents=intents)
     tracker = DiscordContextTracker(agent.store)
+    trusted_webhook_ids = {
+        value.strip()
+        for value in os.getenv("UNICORN_TRUSTED_WEBHOOK_IDS", "").split(",")
+        if value.strip()
+    }
+    trusted_bot_ids = {
+        value.strip()
+        for value in os.getenv("UNICORN_TRUSTED_BOT_IDS", "").split(",")
+        if value.strip()
+    }
 
     @client.event
     async def on_ready() -> None:
@@ -211,6 +231,12 @@ def run_discord(
             return
         is_agent = message.author.id == client.user.id
         is_bot = bool(message.author.bot)
+        actor_id = str(message.author.id)
+        webhook_id = str(message.webhook_id) if message.webhook_id else None
+        trusted_webhook = is_trusted_webhook(webhook_id, trusted_webhook_ids)
+        trusted_bot = is_trusted_bot(actor_id, trusted_bot_ids)
+        trusted_conversational_sender = trusted_webhook or trusted_bot
+        speech_blocked_as_bot = is_bot and not trusted_conversational_sender
         direct = isinstance(message.channel, discord.DMChannel)
         aliases = {client.user.name, "neuro", "neuro-sama", "neurosama"}
         if message.guild is not None and message.guild.me is not None:
@@ -238,7 +264,7 @@ def run_discord(
         occurred_at = message.created_at.isoformat()
         policy_metadata = tracker.metadata(
             channel=str(message.channel.id),
-            actor=str(message.author.id),
+            actor=actor_id,
             content=message.content,
             occurred_at=occurred_at,
             direct=direct,
@@ -255,8 +281,14 @@ def run_discord(
             occurred_at=occurred_at,
             metadata={
                 **policy_metadata,
-                "author_is_bot": is_bot,
+                # Preserve the hard bot-loop stop except for explicitly trusted
+                # conversational bot or webhook identities.
+                "author_is_bot": speech_blocked_as_bot,
+                "discord_author_is_bot": is_bot,
                 "author_is_agent": is_agent,
+                "discord_webhook_id": webhook_id,
+                "trusted_webhook": trusted_webhook,
+                "trusted_bot": trusted_bot,
                 "display_name": message.author.display_name,
                 "discord_message_id": str(message.id),
                 "reply_to_message_id": reply_to_message_id,
@@ -266,7 +298,7 @@ def run_discord(
         )
         speech_eligible = is_speech_eligible(
             mode=mode,
-            is_bot=is_bot,
+            is_bot=speech_blocked_as_bot,
             direct=direct,
             mentioned=mentioned,
             lexically_addressed=lexically_addressed,
