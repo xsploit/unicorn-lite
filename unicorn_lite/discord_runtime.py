@@ -13,6 +13,10 @@ from .discord_context import DiscordContextTracker
 from .models import Experience
 
 
+def _normalized_alias(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
 def is_lexically_addressed(text: str, aliases: set[str]) -> bool:
     """Detect a name used as an opening vocative without forcing a reply."""
     normalized = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
@@ -31,6 +35,58 @@ def is_lexically_addressed(text: str, aliases: set[str]) -> bool:
         if words[start : start + 1] == [normalized_alias.replace(" ", "")]:
             return True
     return False
+
+
+def is_alias_role_mentioned(role_names: list[str], aliases: set[str]) -> bool:
+    """Treat an explicitly mentioned agent-named role as an address signal.
+
+    Discord user mentions and role mentions are distinct. Servers commonly give
+    an app a same-named mentionable role, so selecting ``@Neuro-sama`` can emit
+    ``<@&role_id>`` rather than the app user's ``<@user_id>``.
+    """
+    normalized_aliases = {_normalized_alias(alias) for alias in aliases}
+    normalized_aliases.discard("")
+    return any(_normalized_alias(name) in normalized_aliases for name in role_names)
+
+
+def is_trusted_webhook(
+    webhook_id: str | None, trusted_webhook_ids: set[str]
+) -> bool:
+    return bool(webhook_id and webhook_id in trusted_webhook_ids)
+
+
+def is_trusted_bot(actor_id: str, trusted_bot_ids: set[str]) -> bool:
+    return actor_id in trusted_bot_ids
+
+
+def is_speech_eligible(
+    *,
+    mode: str,
+    is_bot: bool,
+    direct: bool,
+    mentioned: bool,
+    lexically_addressed: bool,
+    replied_to_target: bool,
+    allow_unsolicited: bool,
+    channel: str,
+    unsolicited_channel_ids: set[str] | None,
+) -> bool:
+    """Return whether this turn may reach a writer if the learned gate says REPLY."""
+    directed = direct or mentioned or lexically_addressed or replied_to_target
+    unsolicited = allow_unsolicited and (
+        not unsolicited_channel_ids or channel in unsolicited_channel_ids
+    )
+    return mode == "active" and not is_bot and (directed or unsolicited)
+
+
+def audit_delivery_mode(
+    *, can_send: bool = True, can_embed: bool, can_attach: bool
+) -> str:
+    if not can_send:
+        return "none"
+    if not can_embed:
+        return "text"
+    return "embed_file" if can_attach else "embed"
 
 
 def decision_audit_payload(
@@ -66,6 +122,7 @@ def decision_audit_payload(
             "passed_gate": replied,
         },
         "runtime": {
+            "audit_schema_version": 2,
             "writer_provider": (
                 type(agent.writer).__name__ if agent.writer is not None else None
             ),
@@ -78,10 +135,34 @@ def decision_audit_payload(
             "writer_error": result.writer_error,
             "discord_reply_sent": discord_reply_sent,
             "discord_send_error": discord_send_error,
+            "memory_selector": (
+                "discord-emdr2-v1"
+                if getattr(agent, "emdr2_retriever", None) is not None
+                else (
+                    "answer-aware-v1"
+                    if agent.memory_reranker is not None
+                    else "cosine-top5"
+                )
+            ),
+            "memory_selector_applied": bool(
+                event.metadata.get("emdr2", {}).get("applied")
+                or event.metadata.get("memory_reranker", {}).get("applied")
+            ),
+            "memory_candidate_limit": agent.memory_candidate_limit,
         },
         "neural": {"surprise": result.surprise},
         "event_metadata": event.metadata,
-        "retrieved_memories": [asdict(memory) for memory in result.memories],
+        "retrieved_memories": [
+            {
+                "event_id": memory.event_id,
+                "content": memory.content,
+                "actor": memory.actor,
+                "similarity": memory.similarity,
+                "occurred_at": memory.occurred_at,
+                "decision_action": memory.decision_action,
+            }
+            for memory in result.memories
+        ],
         "facts_updated": result.facts_updated,
     }
 
@@ -95,6 +176,7 @@ def run_discord(
     unsolicited_channel_ids: set[str] | None = None,
     decision_audit_channel_id: str | None = None,
     decision_audit_source_channel_ids: set[str] | None = None,
+    decision_audit_same_channel: bool = False,
 ) -> None:
     import discord
 
@@ -105,6 +187,16 @@ def run_discord(
     intents.message_content = True
     client = discord.Client(intents=intents)
     tracker = DiscordContextTracker(agent.store)
+    trusted_webhook_ids = {
+        value.strip()
+        for value in os.getenv("UNICORN_TRUSTED_WEBHOOK_IDS", "").split(",")
+        if value.strip()
+    }
+    trusted_bot_ids = {
+        value.strip()
+        for value in os.getenv("UNICORN_TRUSTED_BOT_IDS", "").split(",")
+        if value.strip()
+    }
 
     @client.event
     async def on_ready() -> None:
@@ -130,9 +222,7 @@ def run_discord(
         if client.user is None:
             return
         if (
-            decision_audit_channel_id
-            and str(message.channel.id) == decision_audit_channel_id
-            and message.author.id == client.user.id
+            message.author.id == client.user.id
             and any(
                 attachment.filename.startswith("decision-")
                 for attachment in message.attachments
@@ -141,8 +231,13 @@ def run_discord(
             return
         is_agent = message.author.id == client.user.id
         is_bot = bool(message.author.bot)
+        actor_id = str(message.author.id)
+        webhook_id = str(message.webhook_id) if message.webhook_id else None
+        trusted_webhook = is_trusted_webhook(webhook_id, trusted_webhook_ids)
+        trusted_bot = is_trusted_bot(actor_id, trusted_bot_ids)
+        trusted_conversational_sender = trusted_webhook or trusted_bot
+        speech_blocked_as_bot = is_bot and not trusted_conversational_sender
         direct = isinstance(message.channel, discord.DMChannel)
-        mentioned = client.user in message.mentions
         aliases = {client.user.name, "neuro", "neuro-sama", "neurosama"}
         if message.guild is not None and message.guild.me is not None:
             aliases.add(message.guild.me.display_name)
@@ -151,6 +246,11 @@ def run_discord(
             for value in os.getenv("UNICORN_AGENT_ALIASES", "").split(",")
             if value.strip()
         )
+        user_mentioned = client.user in message.mentions
+        role_mentioned = is_alias_role_mentioned(
+            [role.name for role in message.role_mentions], aliases
+        )
+        mentioned = user_mentioned or role_mentioned
         lexically_addressed = is_lexically_addressed(message.content, aliases)
         reply_to_message_id = (
             str(message.reference.message_id)
@@ -164,7 +264,7 @@ def run_discord(
         occurred_at = message.created_at.isoformat()
         policy_metadata = tracker.metadata(
             channel=str(message.channel.id),
-            actor=str(message.author.id),
+            actor=actor_id,
             content=message.content,
             occurred_at=occurred_at,
             direct=direct,
@@ -181,24 +281,44 @@ def run_discord(
             occurred_at=occurred_at,
             metadata={
                 **policy_metadata,
-                "author_is_bot": is_bot,
+                # Preserve the hard bot-loop stop except for explicitly trusted
+                # conversational bot or webhook identities.
+                "author_is_bot": speech_blocked_as_bot,
+                "discord_author_is_bot": is_bot,
                 "author_is_agent": is_agent,
+                "discord_webhook_id": webhook_id,
+                "trusted_webhook": trusted_webhook,
+                "trusted_bot": trusted_bot,
                 "display_name": message.author.display_name,
                 "discord_message_id": str(message.id),
                 "reply_to_message_id": reply_to_message_id,
+                "user_mentioned": user_mentioned,
+                "role_mentioned": role_mentioned,
             },
         )
-        writer_allowed = mode == "active" and not is_bot and (
-            direct
-            or mentioned
-            or (
-                allow_unsolicited
-                and (
-                    not unsolicited_channel_ids
-                    or event.channel in unsolicited_channel_ids
-                )
-            )
+        speech_eligible = is_speech_eligible(
+            mode=mode,
+            is_bot=speech_blocked_as_bot,
+            direct=direct,
+            mentioned=mentioned,
+            lexically_addressed=lexically_addressed,
+            replied_to_target=replied_to_target,
+            allow_unsolicited=allow_unsolicited,
+            channel=event.channel,
+            unsolicited_channel_ids=unsolicited_channel_ids,
         )
+        can_send_response = True
+        if message.guild is not None and message.guild.me is not None:
+            permissions_for = getattr(message.channel, "permissions_for", None)
+            if permissions_for is not None:
+                channel_permissions = permissions_for(message.guild.me)
+                can_send_response = bool(channel_permissions.send_messages)
+                if isinstance(message.channel, discord.Thread):
+                    can_send_response = can_send_response and bool(
+                        channel_permissions.send_messages_in_threads
+                    )
+        writer_allowed = speech_eligible and can_send_response
+        event.metadata["discord_send_allowed"] = can_send_response
         result = await agent.ingest(event, allow_writer=writer_allowed)
         tracker.observe(
             channel=event.channel,
@@ -226,7 +346,8 @@ def run_discord(
                 discord_send_error = f"{type(exc).__name__}: {exc}"
                 print(f"discord reply failed event={event.event_id}: {discord_send_error}")
 
-        should_audit = (
+        should_audit_same_channel = decision_audit_same_channel and writer_allowed
+        should_audit_fixed_channel = bool(
             decision_audit_channel_id
             and not is_bot
             and (
@@ -234,13 +355,17 @@ def run_discord(
                 or event.channel in decision_audit_source_channel_ids
             )
         )
+        should_audit = should_audit_same_channel or should_audit_fixed_channel
         if should_audit:
             try:
-                audit_channel = client.get_channel(int(decision_audit_channel_id))
-                if audit_channel is None:
-                    audit_channel = await client.fetch_channel(
-                        int(decision_audit_channel_id)
-                    )
+                if should_audit_same_channel:
+                    audit_channel = message.channel
+                else:
+                    audit_channel = client.get_channel(int(decision_audit_channel_id))
+                    if audit_channel is None:
+                        audit_channel = await client.fetch_channel(
+                            int(decision_audit_channel_id)
+                        )
                 payload = decision_audit_payload(
                     agent,
                     event,
@@ -255,119 +380,151 @@ def run_discord(
                 margin = probability - threshold
                 metadata = payload["event_metadata"]
                 did_reply = payload["decision"]["passed_gate"]
+                ponder = metadata.get("ponder")
+                ponder_steps = (
+                    int(ponder.get("steps", 0)) if isinstance(ponder, dict) else 0
+                )
+                reason = result.decision.reason
+                if len(reason) > 180:
+                    reason = reason[:177] + "..."
+                content = message.content[:240] or "*No text content*"
+                if len(message.content) > 240:
+                    content += "..."
                 embed = discord.Embed(
                     title=(
-                        "🟢 Controller selected REPLY"
+                        f"🟢 REPLY · {probability * 100:.1f}%"
                         if did_reply
-                        else "🔴 Controller selected SILENCE"
+                        else f"🔴 SILENCE · {probability * 100:.1f}%"
                     ),
                     url=message.jump_url,
                     description=(
-                        f"> {message.content[:700] or '*No text content*'}\n\n"
-                        f"**Reason:** {result.decision.reason}"
+                        f"> {content}\n"
+                        f"Threshold **{threshold * 100:.1f}%** · "
+                        f"margin **{margin * 100:+.1f}** · "
+                        f"tier **{result.decision.compute_tier}**"
+                        + (f" · **{ponder_steps}** steps" if ponder_steps else "")
+                        + f"\n{reason}"
                     ),
                     color=(0x2ECC71 if did_reply else 0xE74C3C),
                     timestamp=message.created_at,
                 )
                 embed.add_field(
-                    name="Reply score",
+                    name="Signals",
                     value=(
-                        f"**{probability * 100:.1f}%**\n"
-                        f"Threshold: {threshold * 100:.1f}%\n"
-                        f"Margin: {margin * 100:+.1f} points"
+                        f"mention {'✓' if metadata.get('mentioned') else '–'} · "
+                        f"address {'✓' if metadata.get('lexically_addressed') else '–'}\n"
+                        f"reply {'✓' if metadata.get('replied_to_target') else '–'} · "
+                        f"question {'✓' if metadata.get('question') else '–'}"
                     ),
                     inline=True,
                 )
-                embed.add_field(
-                    name="Neural state",
-                    value=(
-                        f"Confidence: {result.decision.confidence * 100:.1f}%\n"
-                        f"Surprise: {result.surprise:.3f}\n"
-                        f"Compute tier: {result.decision.compute_tier}"
-                    ),
-                    inline=True,
+                gate_signals = metadata.get("gate_memory_signals", {})
+                reranker = metadata.get("memory_reranker")
+                emdr2 = metadata.get("emdr2")
+                reranker_applied = isinstance(reranker, dict) and reranker.get("applied")
+                memory_lines = (
+                    f"cosine **{float(gate_signals.get('max_memory_similarity', 0)):.3f}** · "
+                    f"answered **{float(gate_signals.get('max_answered_similarity', 0)):.3f}**"
                 )
-                ponder = metadata.get("ponder")
-                if isinstance(ponder, dict):
-                    path = " → ".join(
-                        f"{float(value) * 100:.1f}%"
-                        for value in ponder.get("probability_path", [])
+                if reranker_applied:
+                    selected_probabilities = [
+                        float(value)
+                        for value in reranker.get("selected_probabilities", [])
+                    ]
+                    memory_lines += (
+                        f"\n{int(reranker.get('candidates', 0))}→{len(result.memories)} · "
+                        f"top weight **{(max(selected_probabilities) if selected_probabilities else 0) * 100:.1f}%** · "
+                        f"changed {'✓' if reranker.get('changed_top5') else '–'}"
                     )
-                    embed.add_field(
-                        name="Recursive controller",
-                        value=(
-                            f"Steps: **{int(ponder.get('steps', 0))}/"
-                            f"{int(ponder.get('max_steps', 0))}**\n"
-                            f"Halt: **{float(ponder.get('halt_probability', 0)) * 100:.1f}%** "
-                            f"(needs {float(ponder.get('halt_threshold', 0)) * 100:.1f}%)\n"
-                            f"Reply path: {path or 'n/a'}"
-                        )[:1024],
-                        inline=False,
+                elif isinstance(emdr2, dict) and emdr2.get("applied"):
+                    memory_lines += (
+                        f"\nEMDR² index **{int(emdr2.get('indexed_memories', 0))}** · "
+                        f"changed {'✓' if emdr2.get('changed_top5') else '–'}"
                     )
-                embed.add_field(
-                    name="Output path",
-                    value=(
-                        f"Provider: **{payload['runtime']['writer_provider']}**\n"
-                        f"Model: **{payload['runtime']['writer_model'] or 'none'}**\n"
-                        f"Writer allowed: **{writer_allowed}**\n"
-                        f"Writer called: **{payload['runtime']['writer_attempted']}**\n"
-                        f"Reply sent: **{discord_reply_sent}**"
-                    ),
-                    inline=True,
-                )
-                embed.add_field(
-                    name="Message signals",
-                    value=(
-                        f"Mentioned: **{bool(metadata.get('mentioned'))}**\n"
-                        f"Text address: **{bool(metadata.get('lexically_addressed'))}**\n"
-                        f"Reply to Neuro: **{bool(metadata.get('replied_to_target'))}**\n"
-                        f"Question: **{bool(metadata.get('question'))}**\n"
-                        f"Messages since Neuro: **{int(metadata.get('messages_since_agent', 0))}**"
-                    ),
-                    inline=True,
-                )
-                embed.add_field(
-                    name="Historical rates",
-                    value=(
-                        f"This author: {float(metadata.get('author_reply_rate_past', 0)) * 100:.1f}%\n"
-                        f"This channel: {float(metadata.get('channel_reply_rate_past', 0)) * 100:.1f}%\n"
-                        f"Global: {float(metadata.get('global_reply_rate_past', 0)) * 100:.1f}%\n"
-                        f"Recent activity: {float(metadata.get('recent_agent_activity', 0)) * 100:.1f}%"
-                    ),
-                    inline=True,
-                )
+                else:
+                    memory_lines += "\nselector gated off"
                 embed.add_field(
                     name="Memory",
+                    value=memory_lines,
+                    inline=True,
+                )
+                model = payload["runtime"]["writer_model"] or "none"
+                if len(model) > 28:
+                    model = "…" + model[-27:]
+                embed.add_field(
+                    name="Output",
                     value=(
-                        f"Retrieved: **{len(result.memories)}**\n"
-                        f"Best similarity: **"
-                        f"{(result.memories[0].similarity if result.memories else 0):.3f}**\n"
-                        f"Answered match: **"
-                        f"{float(metadata.get('gate_memory_signals', {}).get('max_answered_similarity', 0)):.3f}**\n"
-                        f"Recent answered: **"
-                        f"{float(metadata.get('gate_memory_signals', {}).get('recent_answered_similarity', 0)):.3f}**\n"
-                        f"Near-repeat cooldown: **"
-                        f"{bool(metadata.get('gate_memory_signals', {}).get('recent_answered_near_duplicate'))}**\n"
-                        f"Answered age: **"
-                        f"{float(metadata.get('gate_memory_signals', {}).get('seconds_since_answered_match', 86400)):.0f}s**\n"
-                        f"Exact repeat: **"
-                        f"{bool(metadata.get('gate_memory_signals', {}).get('exact_duplicate'))}**\n"
-                        f"Facts updated: **{len(result.facts_updated)}**"
+                        f"model **{model}**\n"
+                        f"called {'✓' if payload['runtime']['writer_attempted'] else '–'} · "
+                        f"sent {'✓' if discord_reply_sent else '–'}"
                     ),
                     inline=True,
                 )
-                embed.set_footer(text=f"event {event.event_id} · full metadata attached")
+                can_embed = True
+                can_attach = True
+                can_send = True
+                if message.guild is not None and message.guild.me is not None:
+                    permissions_for = getattr(audit_channel, "permissions_for", None)
+                    if permissions_for is not None:
+                        permissions = permissions_for(message.guild.me)
+                        can_send = bool(permissions.send_messages)
+                        can_embed = bool(permissions.embed_links)
+                        can_attach = bool(permissions.attach_files)
+                footer = f"schema v2 · event {event.event_id[:8]}"
+                embed.set_footer(
+                    text=(
+                        f"{footer} · full JSON attached"
+                        if can_attach
+                        else f"{footer} · JSON omitted (Attach Files unavailable)"
+                    )
+                )
                 encoded = json.dumps(
                     payload, ensure_ascii=False, indent=2, default=str
                 ).encode("utf-8")
-                await audit_channel.send(
-                    embed=embed,
-                    file=discord.File(
-                        io.BytesIO(encoded),
-                        filename=f"decision-{message.id}.json",
-                    ),
-                    allowed_mentions=discord.AllowedMentions.none(),
+                allowed_mentions = discord.AllowedMentions.none()
+                delivery_mode = audit_delivery_mode(
+                    can_send=can_send,
+                    can_embed=can_embed,
+                    can_attach=can_attach,
                 )
+                if delivery_mode == "none":
+                    print(
+                        f"decision audit skipped event={event.event_id}: "
+                        "channel denies Send Messages"
+                    )
+                elif delivery_mode == "text":
+                    await audit_channel.send(
+                        content=(
+                            f"{'REPLY' if did_reply else 'SILENCE'} "
+                            f"{probability * 100:.1f}% · threshold "
+                            f"{threshold * 100:.1f}% · event {event.event_id[:8]}"
+                        ),
+                        allowed_mentions=allowed_mentions,
+                    )
+                elif delivery_mode == "embed":
+                    await audit_channel.send(
+                        embed=embed, allowed_mentions=allowed_mentions
+                    )
+                else:
+                    try:
+                        await audit_channel.send(
+                            embed=embed,
+                            file=discord.File(
+                                io.BytesIO(encoded),
+                                filename=f"decision-{message.id}.json",
+                            ),
+                            allowed_mentions=allowed_mentions,
+                        )
+                    except discord.Forbidden:
+                        # Channel overrides can make cached attachment permissions
+                        # stale. Preserve the receipt even when the JSON upload is
+                        # rejected atomically by Discord.
+                        embed.set_footer(
+                            text=f"{footer} · JSON omitted (upload forbidden)"
+                        )
+                        await audit_channel.send(
+                            embed=embed, allowed_mentions=allowed_mentions
+                        )
             except Exception as exc:
                 print(
                     f"decision audit failed event={event.event_id}: "

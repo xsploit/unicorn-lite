@@ -79,6 +79,10 @@ def _agent(args: argparse.Namespace) -> UnicornAgent:
         device=device,
         writer=writer,
         checkpoint=checkpoint,
+        memory_reranker_checkpoint=getattr(
+            args, "memory_reranker_checkpoint", None
+        ),
+        emdr2_checkpoint=getattr(args, "emdr2_checkpoint", None),
     )
     if getattr(args, "command", None) == "discord":
         gate_checkpoint = Path(args.gate_checkpoint)
@@ -388,6 +392,20 @@ def build_parser() -> argparse.ArgumentParser:
     discord_parser = commands.add_parser("discord", help="listen to all Discord messages")
     _common(discord_parser)
     discord_parser.add_argument(
+        "--memory-reranker-checkpoint",
+        help=(
+            "accepted answer-aware reranker; applied only after the local gate "
+            "selects REPLY"
+        ),
+    )
+    discord_parser.add_argument(
+        "--emdr2-checkpoint",
+        help=(
+            "accepted Discord-scale EMDR2 directory; its learned retriever "
+            "runs only after the local speech gate selects REPLY"
+        ),
+    )
+    discord_parser.add_argument(
         "--mode", choices=("shadow", "active"), default="shadow"
     )
     discord_parser.add_argument(
@@ -436,6 +454,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="limit Discord decision audits to messages from specific channels",
     )
+    discord_parser.add_argument(
+        "--decision-audit-same-channel",
+        action="store_true",
+        help=(
+            "send a compact REPLY/SILENCE audit beside every message that is "
+            "eligible to reach the writer"
+        ),
+    )
     discord_parser.set_defaults(
         func=lambda args: run_discord(
             _agent(args),
@@ -447,6 +473,7 @@ def build_parser() -> argparse.ArgumentParser:
             decision_audit_source_channel_ids=(
                 set(args.decision_audit_source_channel_id) or None
             ),
+            decision_audit_same_channel=args.decision_audit_same_channel,
         )
     )
 

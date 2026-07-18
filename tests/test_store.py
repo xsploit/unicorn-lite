@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 
 from unicorn_lite.encoder import HashEncoder
-from unicorn_lite.models import Experience
+from unicorn_lite.models import Decision, Experience
 from unicorn_lite.store import MemoryStore
 
 
@@ -66,6 +66,18 @@ class StoreTests(unittest.TestCase):
 
             self.assertEqual([hit.event_id for hit in hits_384], [event_384.event_id])
             self.assertEqual([hit.event_id for hit in hits_768], [event_768.event_id])
+            store.close()
+
+    def test_memory_records_preserve_provenance_and_latest_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = MemoryStore(Path(directory) / "memory.db")
+            event = Experience("remember this", actor="subsect")
+            store.append_event(event, np.ones(4, dtype=np.float32))
+            store.record_decision(event.event_id, Decision("OBSERVE", 0, 0.8, "test"))
+            rows = store.memory_records()
+            self.assertEqual(rows[0]["event_id"], event.event_id)
+            self.assertEqual(rows[0]["actor"], "subsect")
+            self.assertEqual(rows[0]["decision_action"], "OBSERVE")
             store.close()
 
 
