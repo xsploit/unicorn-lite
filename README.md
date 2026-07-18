@@ -300,7 +300,8 @@ adaptive depth beat fixed one-step and forced eight-step average precision
 (0.8893 versus 0.8878 and 0.8880). The gain was larger on implicit turns
 (0.6550 versus 0.6430 and 0.6224). Forced extra computation was therefore worse;
 the learned halt decision is the useful part. Decision-audit embeds expose the
-step count, halt probability, and reply-probability path.
+selected probability and step count; the attached schema-v2 JSON retains the
+halt probability and complete reply-probability path.
 
 The external tests remain a warning. On Ishiki and When2Speak, the controller
 spent roughly 3.1 steps but severely over-replied because their conversation and

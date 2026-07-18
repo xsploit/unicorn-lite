@@ -33,6 +33,26 @@ def is_lexically_addressed(text: str, aliases: set[str]) -> bool:
     return False
 
 
+def is_speech_eligible(
+    *,
+    mode: str,
+    is_bot: bool,
+    direct: bool,
+    mentioned: bool,
+    lexically_addressed: bool,
+    replied_to_target: bool,
+    allow_unsolicited: bool,
+    channel: str,
+    unsolicited_channel_ids: set[str] | None,
+) -> bool:
+    """Return whether this turn may reach a writer if the learned gate says REPLY."""
+    directed = direct or mentioned or lexically_addressed or replied_to_target
+    unsolicited = allow_unsolicited and (
+        not unsolicited_channel_ids or channel in unsolicited_channel_ids
+    )
+    return mode == "active" and not is_bot and (directed or unsolicited)
+
+
 def decision_audit_payload(
     agent: UnicornAgent,
     event: Experience,
@@ -115,6 +135,7 @@ def run_discord(
     unsolicited_channel_ids: set[str] | None = None,
     decision_audit_channel_id: str | None = None,
     decision_audit_source_channel_ids: set[str] | None = None,
+    decision_audit_same_channel: bool = False,
 ) -> None:
     import discord
 
@@ -150,9 +171,7 @@ def run_discord(
         if client.user is None:
             return
         if (
-            decision_audit_channel_id
-            and str(message.channel.id) == decision_audit_channel_id
-            and message.author.id == client.user.id
+            message.author.id == client.user.id
             and any(
                 attachment.filename.startswith("decision-")
                 for attachment in message.attachments
@@ -208,16 +227,16 @@ def run_discord(
                 "reply_to_message_id": reply_to_message_id,
             },
         )
-        writer_allowed = mode == "active" and not is_bot and (
-            direct
-            or mentioned
-            or (
-                allow_unsolicited
-                and (
-                    not unsolicited_channel_ids
-                    or event.channel in unsolicited_channel_ids
-                )
-            )
+        writer_allowed = is_speech_eligible(
+            mode=mode,
+            is_bot=is_bot,
+            direct=direct,
+            mentioned=mentioned,
+            lexically_addressed=lexically_addressed,
+            replied_to_target=replied_to_target,
+            allow_unsolicited=allow_unsolicited,
+            channel=event.channel,
+            unsolicited_channel_ids=unsolicited_channel_ids,
         )
         result = await agent.ingest(event, allow_writer=writer_allowed)
         tracker.observe(
@@ -246,7 +265,8 @@ def run_discord(
                 discord_send_error = f"{type(exc).__name__}: {exc}"
                 print(f"discord reply failed event={event.event_id}: {discord_send_error}")
 
-        should_audit = (
+        should_audit_same_channel = decision_audit_same_channel and writer_allowed
+        should_audit_fixed_channel = bool(
             decision_audit_channel_id
             and not is_bot
             and (
@@ -254,13 +274,17 @@ def run_discord(
                 or event.channel in decision_audit_source_channel_ids
             )
         )
+        should_audit = should_audit_same_channel or should_audit_fixed_channel
         if should_audit:
             try:
-                audit_channel = client.get_channel(int(decision_audit_channel_id))
-                if audit_channel is None:
-                    audit_channel = await client.fetch_channel(
-                        int(decision_audit_channel_id)
-                    )
+                if should_audit_same_channel:
+                    audit_channel = message.channel
+                else:
+                    audit_channel = client.get_channel(int(decision_audit_channel_id))
+                    if audit_channel is None:
+                        audit_channel = await client.fetch_channel(
+                            int(decision_audit_channel_id)
+                        )
                 payload = decision_audit_payload(
                     agent,
                     event,
@@ -275,131 +299,83 @@ def run_discord(
                 margin = probability - threshold
                 metadata = payload["event_metadata"]
                 did_reply = payload["decision"]["passed_gate"]
+                ponder = metadata.get("ponder")
+                ponder_steps = (
+                    int(ponder.get("steps", 0)) if isinstance(ponder, dict) else 0
+                )
+                reason = result.decision.reason
+                if len(reason) > 180:
+                    reason = reason[:177] + "..."
+                content = message.content[:240] or "*No text content*"
+                if len(message.content) > 240:
+                    content += "..."
                 embed = discord.Embed(
                     title=(
-                        "🟢 Controller selected REPLY"
+                        f"🟢 REPLY · {probability * 100:.1f}%"
                         if did_reply
-                        else "🔴 Controller selected SILENCE"
+                        else f"🔴 SILENCE · {probability * 100:.1f}%"
                     ),
                     url=message.jump_url,
                     description=(
-                        f"> {message.content[:700] or '*No text content*'}\n\n"
-                        f"**Reason:** {result.decision.reason}"
+                        f"> {content}\n"
+                        f"Threshold **{threshold * 100:.1f}%** · "
+                        f"margin **{margin * 100:+.1f}** · "
+                        f"tier **{result.decision.compute_tier}**"
+                        + (f" · **{ponder_steps}** steps" if ponder_steps else "")
+                        + f"\n{reason}"
                     ),
                     color=(0x2ECC71 if did_reply else 0xE74C3C),
                     timestamp=message.created_at,
                 )
                 embed.add_field(
-                    name="Reply score",
+                    name="Signals",
                     value=(
-                        f"**{probability * 100:.1f}%**\n"
-                        f"Threshold: {threshold * 100:.1f}%\n"
-                        f"Margin: {margin * 100:+.1f} points"
+                        f"mention {'✓' if metadata.get('mentioned') else '–'} · "
+                        f"address {'✓' if metadata.get('lexically_addressed') else '–'}\n"
+                        f"reply {'✓' if metadata.get('replied_to_target') else '–'} · "
+                        f"question {'✓' if metadata.get('question') else '–'}"
                     ),
                     inline=True,
                 )
-                embed.add_field(
-                    name="Neural state",
-                    value=(
-                        f"Confidence: {result.decision.confidence * 100:.1f}%\n"
-                        f"Surprise: {result.surprise:.3f}\n"
-                        f"Compute tier: {result.decision.compute_tier}"
-                    ),
-                    inline=True,
-                )
-                ponder = metadata.get("ponder")
-                if isinstance(ponder, dict):
-                    path = " → ".join(
-                        f"{float(value) * 100:.1f}%"
-                        for value in ponder.get("probability_path", [])
-                    )
-                    embed.add_field(
-                        name="Recursive controller",
-                        value=(
-                            f"Steps: **{int(ponder.get('steps', 0))}/"
-                            f"{int(ponder.get('max_steps', 0))}**\n"
-                            f"Halt: **{float(ponder.get('halt_probability', 0)) * 100:.1f}%** "
-                            f"(needs {float(ponder.get('halt_threshold', 0)) * 100:.1f}%)\n"
-                            f"Reply path: {path or 'n/a'}"
-                        )[:1024],
-                        inline=False,
-                    )
-                embed.add_field(
-                    name="Output path",
-                    value=(
-                        f"Provider: **{payload['runtime']['writer_provider']}**\n"
-                        f"Model: **{payload['runtime']['writer_model'] or 'none'}**\n"
-                        f"Writer allowed: **{writer_allowed}**\n"
-                        f"Writer called: **{payload['runtime']['writer_attempted']}**\n"
-                        f"Reply sent: **{discord_reply_sent}**\n"
-                        f"Memory selector: **{payload['runtime']['memory_selector']}** "
-                        f"({'applied' if payload['runtime']['memory_selector_applied'] else 'gated off'})"
-                    ),
-                    inline=True,
-                )
-                embed.add_field(
-                    name="Message signals",
-                    value=(
-                        f"Mentioned: **{bool(metadata.get('mentioned'))}**\n"
-                        f"Text address: **{bool(metadata.get('lexically_addressed'))}**\n"
-                        f"Reply to Neuro: **{bool(metadata.get('replied_to_target'))}**\n"
-                        f"Question: **{bool(metadata.get('question'))}**\n"
-                        f"Messages since Neuro: **{int(metadata.get('messages_since_agent', 0))}**"
-                    ),
-                    inline=True,
-                )
-                embed.add_field(
-                    name="Historical rates",
-                    value=(
-                        f"This author: {float(metadata.get('author_reply_rate_past', 0)) * 100:.1f}%\n"
-                        f"This channel: {float(metadata.get('channel_reply_rate_past', 0)) * 100:.1f}%\n"
-                        f"Global: {float(metadata.get('global_reply_rate_past', 0)) * 100:.1f}%\n"
-                        f"Recent activity: {float(metadata.get('recent_agent_activity', 0)) * 100:.1f}%"
-                    ),
-                    inline=True,
-                )
-                embed.add_field(
-                    name="Memory",
-                    value=(
-                        f"Writer memories: **{len(result.memories)}**\n"
-                        f"Gate best cosine: **"
-                        f"{float(metadata.get('gate_memory_signals', {}).get('max_memory_similarity', 0)):.3f}**\n"
-                        f"Writer top cosine: **"
-                        f"{(result.memories[0].similarity if result.memories else 0):.3f}**\n"
-                        f"Answered match: **"
-                        f"{float(metadata.get('gate_memory_signals', {}).get('max_answered_similarity', 0)):.3f}**\n"
-                        f"Recent answered: **"
-                        f"{float(metadata.get('gate_memory_signals', {}).get('recent_answered_similarity', 0)):.3f}**\n"
-                        f"Near-repeat cooldown: **"
-                        f"{bool(metadata.get('gate_memory_signals', {}).get('recent_answered_near_duplicate'))}**\n"
-                        f"Answered age: **"
-                        f"{float(metadata.get('gate_memory_signals', {}).get('seconds_since_answered_match', 86400)):.0f}s**\n"
-                        f"Exact repeat: **"
-                        f"{bool(metadata.get('gate_memory_signals', {}).get('exact_duplicate'))}**\n"
-                        f"Facts updated: **{len(result.facts_updated)}**"
-                    ),
-                    inline=True,
-                )
+                gate_signals = metadata.get("gate_memory_signals", {})
                 reranker = metadata.get("memory_reranker")
-                if isinstance(reranker, dict) and reranker.get("applied"):
+                reranker_applied = isinstance(reranker, dict) and reranker.get("applied")
+                memory_lines = (
+                    f"cosine **{float(gate_signals.get('max_memory_similarity', 0)):.3f}** · "
+                    f"answered **{float(gate_signals.get('max_answered_similarity', 0)):.3f}**"
+                )
+                if reranker_applied:
                     selected_probabilities = [
                         float(value)
                         for value in reranker.get("selected_probabilities", [])
                     ]
-                    embed.add_field(
-                        name="Answer-aware memory",
-                        value=(
-                            f"Candidates: **{int(reranker.get('candidates', 0))}**\n"
-                            f"Changed cosine top 5: **"
-                            f"{bool(reranker.get('changed_top5'))}**\n"
-                            f"Top selection weight: **"
-                            f"{(max(selected_probabilities) if selected_probabilities else 0) * 100:.1f}%**\n"
-                            f"Selector margin: **"
-                            f"{float(reranker.get('selector_margin', 0)):.3f}**"
-                        ),
-                        inline=True,
+                    memory_lines += (
+                        f"\n{int(reranker.get('candidates', 0))}→{len(result.memories)} · "
+                        f"top weight **{(max(selected_probabilities) if selected_probabilities else 0) * 100:.1f}%** · "
+                        f"changed {'✓' if reranker.get('changed_top5') else '–'}"
                     )
-                embed.set_footer(text=f"event {event.event_id} · full metadata attached")
+                else:
+                    memory_lines += "\nselector gated off"
+                embed.add_field(
+                    name="Memory",
+                    value=memory_lines,
+                    inline=True,
+                )
+                model = payload["runtime"]["writer_model"] or "none"
+                if len(model) > 28:
+                    model = "…" + model[-27:]
+                embed.add_field(
+                    name="Output",
+                    value=(
+                        f"model **{model}**\n"
+                        f"called {'✓' if payload['runtime']['writer_attempted'] else '–'} · "
+                        f"sent {'✓' if discord_reply_sent else '–'}"
+                    ),
+                    inline=True,
+                )
+                embed.set_footer(
+                    text=f"schema v2 · event {event.event_id[:8]} · full JSON attached"
+                )
                 encoded = json.dumps(
                     payload, ensure_ascii=False, indent=2, default=str
                 ).encode("utf-8")

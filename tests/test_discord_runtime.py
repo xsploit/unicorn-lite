@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 import numpy as np
 
-from unicorn_lite.discord_runtime import decision_audit_payload, is_lexically_addressed
+from unicorn_lite.discord_runtime import (
+    decision_audit_payload,
+    is_lexically_addressed,
+    is_speech_eligible,
+)
 from unicorn_lite.models import Decision, Experience, MemoryHit
 
 
@@ -19,6 +23,39 @@ class DiscordRuntimeTests(unittest.TestCase):
         aliases = {"neuro"}
         self.assertFalse(is_lexically_addressed("I was talking about neuro earlier", aliases))
         self.assertFalse(is_lexically_addressed("neurology is interesting", aliases))
+
+    def test_directed_messages_are_eligible_in_any_channel(self) -> None:
+        common = {
+            "mode": "active",
+            "is_bot": False,
+            "direct": False,
+            "allow_unsolicited": False,
+            "channel": "outside-allowlist",
+            "unsolicited_channel_ids": {"general"},
+        }
+        for signal in ("mentioned", "lexically_addressed", "replied_to_target"):
+            values = {
+                "mentioned": False,
+                "lexically_addressed": False,
+                "replied_to_target": False,
+                **common,
+            }
+            values[signal] = True
+            self.assertTrue(is_speech_eligible(**values), signal)
+
+    def test_ordinary_messages_require_unsolicited_allowlist(self) -> None:
+        common = {
+            "mode": "active",
+            "is_bot": False,
+            "direct": False,
+            "mentioned": False,
+            "lexically_addressed": False,
+            "replied_to_target": False,
+            "allow_unsolicited": True,
+            "unsolicited_channel_ids": {"general"},
+        }
+        self.assertTrue(is_speech_eligible(channel="general", **common))
+        self.assertFalse(is_speech_eligible(channel="random", **common))
 
     def test_audit_identifies_memory_mode_without_serializing_embeddings(self) -> None:
         policy = SimpleNamespace(threshold_for=lambda _: 0.28)

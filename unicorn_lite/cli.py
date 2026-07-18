@@ -446,6 +446,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help="limit Discord decision audits to messages from specific channels",
     )
+    discord_parser.add_argument(
+        "--decision-audit-same-channel",
+        action="store_true",
+        help=(
+            "send a compact REPLY/SILENCE audit beside every message that is "
+            "eligible to reach the writer"
+        ),
+    )
     discord_parser.set_defaults(
         func=lambda args: run_discord(
             _agent(args),
@@ -457,6 +465,7 @@ def build_parser() -> argparse.ArgumentParser:
             decision_audit_source_channel_ids=(
                 set(args.decision_audit_source_channel_id) or None
             ),
+            decision_audit_same_channel=args.decision_audit_same_channel,
         )
     )
 

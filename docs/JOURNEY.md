@@ -72,9 +72,11 @@ The gate was extended with a small recurrent ponder loop. This is not recursive
 LLM prompting. The local GRU may reuse its hidden state for one to eight steps and
 a learned halt head decides when further computation is not worth its cost.
 
-Audit embeds expose the entire probability path and halt decision. A path may rise
-or fall because every recurrent update changes the hidden representation. The
-last selected probability is compared with the channel threshold.
+The compact audit embed exposes the selected probability and step count, while
+its attached schema-v2 JSON retains the entire probability path and halt
+decision. A path may rise or fall because every recurrent update changes the
+hidden representation. The last selected probability is compared with the
+channel threshold.
 
 ## 5. Failure: relevance became repetition
 
@@ -177,6 +179,12 @@ the gate's best cosine separately from the writer's top selected cosine, reports
 normalized selector weight and margin instead of an uninterpretable raw logit,
 and excludes internal 384-float embeddings from attached JSON. Silent events show
 the answer-aware selector as configured but gated off.
+
+Same-channel audits follow the speech boundary rather than a single diagnostics
+channel. A mention, reply, DM, or opening name-address is eligible anywhere the
+bot can send; unaddressed conversation remains confined to the configured
+unsolicited-channel allowlist. Both REPLY and SILENCE decisions receive the
+compact receipt, so a refused tag remains observable without calling the writer.
 
 Natural Questions, TriviaQA, and WebQuestions may warm-start factual passage
 retrieval. They are not substitutes for Discord data when learning callbacks,
