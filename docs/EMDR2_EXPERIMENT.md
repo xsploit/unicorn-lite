@@ -33,7 +33,9 @@ do not support the target reply.
 ## First model
 
 - Candidate generator: existing local MiniLM retrieval, top 20.
-- Reranker: MPC-BERT or BERT-base cross-encoder with a binary usefulness head.
+- Reranker: a small PyTorch selector over frozen MiniLM query/memory vectors.
+- Training-only reader: predicts the historical reply embedding so downstream
+  answer loss reaches the selector; it is discarded for runtime ranking.
 - Deployment: return top 5 with calibrated scores and provenance.
 - Writer: unchanged Vercel or local backend.
 - GPU target: RTX 5060 Ti 16 GB, mixed precision, short Discord contexts.
@@ -49,3 +51,30 @@ do not support the target reply.
 
 The experiment is rejected if it improves a proxy retrieval metric while making
 live replies more repetitive or increasing unsupported personal claims.
+
+## Current status
+
+An all-reply first attempt failed its held-out acceptance test. Adding an
+answer-aware latent-memory posterior and filtering for genuinely memory-dependent
+interactions produced stable gains across three seeds. The checkpoint remains
+opt-in and affects only memory ordering after the response gate has already chosen
+to speak. Shadow comparison is required before live promotion.
+
+Build and train locally:
+
+```powershell
+$env:PYTHONPATH = '.'
+py -3.10 .\scripts\build_memory_reranker_dataset.py `
+  .\data\discord-history.jsonl `
+  --target-author-id YOUR_AGENT_ID `
+  --output .\data\memory-reranker-groups.jsonl
+
+py -3.10 .\scripts\train_memory_reranker.py `
+  .\data\memory-reranker-groups.jsonl `
+  --output .\data\answer-aware-memory-reranker.pt `
+  --encoder local --device cuda
+```
+
+An accepted checkpoint can be evaluated in a Discord runtime with
+`--memory-reranker-checkpoint`. It cannot influence the response gate: the
+reranker executes only after the decision action begins with `REPLY`.

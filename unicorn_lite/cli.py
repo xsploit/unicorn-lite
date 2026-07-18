@@ -79,6 +79,9 @@ def _agent(args: argparse.Namespace) -> UnicornAgent:
         device=device,
         writer=writer,
         checkpoint=checkpoint,
+        memory_reranker_checkpoint=getattr(
+            args, "memory_reranker_checkpoint", None
+        ),
     )
     if getattr(args, "command", None) == "discord":
         gate_checkpoint = Path(args.gate_checkpoint)
@@ -387,6 +390,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     discord_parser = commands.add_parser("discord", help="listen to all Discord messages")
     _common(discord_parser)
+    discord_parser.add_argument(
+        "--memory-reranker-checkpoint",
+        help=(
+            "accepted answer-aware reranker; applied only after the local gate "
+            "selects REPLY"
+        ),
+    )
     discord_parser.add_argument(
         "--mode", choices=("shadow", "active"), default="shadow"
     )

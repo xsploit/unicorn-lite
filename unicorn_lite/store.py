@@ -172,6 +172,7 @@ class MemoryStore:
                     similarity=similarity,
                     occurred_at=row["occurred_at"],
                     decision_action=row["decision_action"],
+                    embedding=vector,
                 )
             )
         hits.sort(key=lambda item: item.similarity, reverse=True)

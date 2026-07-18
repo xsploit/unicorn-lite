@@ -27,6 +27,7 @@ class MemoryHit:
     similarity: float
     occurred_at: str
     decision_action: str | None = None
+    embedding: Any = field(default=None, repr=False)
 
 
 @dataclass(slots=True)

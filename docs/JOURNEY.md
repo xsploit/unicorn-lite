@@ -138,6 +138,34 @@ can be tested locally:
 5. The challenger is accepted only if held-out reply retrieval and live memory
    attribution improve without raising writer-call rate.
 
+### First reranker results
+
+The first end-to-end selector/reader trained on all 1,037 explicit reply groups
+failed. Although training loss fell from 1.499 to 0.227, held-out oracle-memory MRR
+was 0.199 versus cosine retrieval's 0.283. Most ordinary Discord replies simply do
+not require an old memory, so the reader learned a weak shortcut instead of useful
+selection. That checkpoint is marked rejected and cannot be loaded by the runtime.
+
+The corrected experiment approximates EMDR2's E-step. The known historical reply
+defines a soft posterior over candidate memories during training, and groups are
+kept only when at least one causally prior memory is more reply-relevant than the
+current query by 0.05 cosine points. This retained 615 groups: 492 chronological
+training and 123 held-out validation groups.
+
+Three independent seeds all beat cosine retrieval:
+
+| Metric | Cosine | Learned, seed range |
+|---|---:|---:|
+| Top-1 memory similarity to target reply | 0.299 | 0.376-0.401 |
+| Oracle-memory MRR | 0.236 | 0.361-0.380 |
+| Predicted reply cosine | query-only 0.320 | 0.354-0.375 |
+
+The selector is now available behind an optional accepted-checkpoint flag. It
+runs only after the existing local gate chooses REPLY, so it cannot increase the
+writer-call rate or turn a silent message into speech. The live bot remains on the
+cosine retriever until a shadow attribution comparison checks actual selected
+memories, latency, and rendered-reply regressions.
+
 Natural Questions, TriviaQA, and WebQuestions may warm-start factual passage
 retrieval. They are not substitutes for Discord data when learning callbacks,
 relationships, conversation state, or when to remain silent.
