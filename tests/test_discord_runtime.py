@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import numpy as np
 
 from unicorn_lite.discord_runtime import (
+    audit_delivery_mode,
     decision_audit_payload,
     is_lexically_addressed,
     is_speech_eligible,
@@ -56,6 +57,23 @@ class DiscordRuntimeTests(unittest.TestCase):
         }
         self.assertTrue(is_speech_eligible(channel="general", **common))
         self.assertFalse(is_speech_eligible(channel="random", **common))
+
+    def test_audit_keeps_receipt_when_attachments_are_forbidden(self) -> None:
+        self.assertEqual(
+            audit_delivery_mode(can_embed=True, can_attach=True), "embed_file"
+        )
+        self.assertEqual(
+            audit_delivery_mode(can_embed=True, can_attach=False), "embed"
+        )
+        self.assertEqual(
+            audit_delivery_mode(can_embed=False, can_attach=True), "text"
+        )
+        self.assertEqual(
+            audit_delivery_mode(
+                can_send=False, can_embed=True, can_attach=True
+            ),
+            "none",
+        )
 
     def test_audit_identifies_memory_mode_without_serializing_embeddings(self) -> None:
         policy = SimpleNamespace(threshold_for=lambda _: 0.28)

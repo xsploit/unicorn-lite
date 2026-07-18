@@ -53,6 +53,16 @@ def is_speech_eligible(
     return mode == "active" and not is_bot and (directed or unsolicited)
 
 
+def audit_delivery_mode(
+    *, can_send: bool = True, can_embed: bool, can_attach: bool
+) -> str:
+    if not can_send:
+        return "none"
+    if not can_embed:
+        return "text"
+    return "embed_file" if can_attach else "embed"
+
+
 def decision_audit_payload(
     agent: UnicornAgent,
     event: Experience,
@@ -232,7 +242,7 @@ def run_discord(
                 "reply_to_message_id": reply_to_message_id,
             },
         )
-        writer_allowed = is_speech_eligible(
+        speech_eligible = is_speech_eligible(
             mode=mode,
             is_bot=is_bot,
             direct=direct,
@@ -243,6 +253,18 @@ def run_discord(
             channel=event.channel,
             unsolicited_channel_ids=unsolicited_channel_ids,
         )
+        can_send_response = True
+        if message.guild is not None and message.guild.me is not None:
+            permissions_for = getattr(message.channel, "permissions_for", None)
+            if permissions_for is not None:
+                channel_permissions = permissions_for(message.guild.me)
+                can_send_response = bool(channel_permissions.send_messages)
+                if isinstance(message.channel, discord.Thread):
+                    can_send_response = can_send_response and bool(
+                        channel_permissions.send_messages_in_threads
+                    )
+        writer_allowed = speech_eligible and can_send_response
+        event.metadata["discord_send_allowed"] = can_send_response
         result = await agent.ingest(event, allow_writer=writer_allowed)
         tracker.observe(
             channel=event.channel,
@@ -384,20 +406,71 @@ def run_discord(
                     ),
                     inline=True,
                 )
+                can_embed = True
+                can_attach = True
+                can_send = True
+                if message.guild is not None and message.guild.me is not None:
+                    permissions_for = getattr(audit_channel, "permissions_for", None)
+                    if permissions_for is not None:
+                        permissions = permissions_for(message.guild.me)
+                        can_send = bool(permissions.send_messages)
+                        can_embed = bool(permissions.embed_links)
+                        can_attach = bool(permissions.attach_files)
+                footer = f"schema v2 · event {event.event_id[:8]}"
                 embed.set_footer(
-                    text=f"schema v2 · event {event.event_id[:8]} · full JSON attached"
+                    text=(
+                        f"{footer} · full JSON attached"
+                        if can_attach
+                        else f"{footer} · JSON omitted (Attach Files unavailable)"
+                    )
                 )
                 encoded = json.dumps(
                     payload, ensure_ascii=False, indent=2, default=str
                 ).encode("utf-8")
-                await audit_channel.send(
-                    embed=embed,
-                    file=discord.File(
-                        io.BytesIO(encoded),
-                        filename=f"decision-{message.id}.json",
-                    ),
-                    allowed_mentions=discord.AllowedMentions.none(),
+                allowed_mentions = discord.AllowedMentions.none()
+                delivery_mode = audit_delivery_mode(
+                    can_send=can_send,
+                    can_embed=can_embed,
+                    can_attach=can_attach,
                 )
+                if delivery_mode == "none":
+                    print(
+                        f"decision audit skipped event={event.event_id}: "
+                        "channel denies Send Messages"
+                    )
+                elif delivery_mode == "text":
+                    await audit_channel.send(
+                        content=(
+                            f"{'REPLY' if did_reply else 'SILENCE'} "
+                            f"{probability * 100:.1f}% · threshold "
+                            f"{threshold * 100:.1f}% · event {event.event_id[:8]}"
+                        ),
+                        allowed_mentions=allowed_mentions,
+                    )
+                elif delivery_mode == "embed":
+                    await audit_channel.send(
+                        embed=embed, allowed_mentions=allowed_mentions
+                    )
+                else:
+                    try:
+                        await audit_channel.send(
+                            embed=embed,
+                            file=discord.File(
+                                io.BytesIO(encoded),
+                                filename=f"decision-{message.id}.json",
+                            ),
+                            allowed_mentions=allowed_mentions,
+                        )
+                    except discord.Forbidden:
+                        # Channel overrides can make cached attachment permissions
+                        # stale. Preserve the receipt even when the JSON upload is
+                        # rejected atomically by Discord.
+                        embed.set_footer(
+                            text=f"{footer} · JSON omitted (upload forbidden)"
+                        )
+                        await audit_channel.send(
+                            embed=embed, allowed_mentions=allowed_mentions
+                        )
             except Exception as exc:
                 print(
                     f"decision audit failed event={event.event_id}: "
