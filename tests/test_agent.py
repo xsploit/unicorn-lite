@@ -122,6 +122,12 @@ class AgentTests(unittest.TestCase):
             self.assertTrue(event.metadata["memory_reranker"]["applied"])
             self.assertIn("cosine_event_ids", event.metadata["memory_reranker"])
             self.assertIn("changed_top5", event.metadata["memory_reranker"])
+            self.assertIn("selected_probabilities", event.metadata["memory_reranker"])
+            probabilities = event.metadata["memory_reranker"][
+                "selected_probabilities"
+            ]
+            self.assertTrue(all(0.0 <= value <= 1.0 for value in probabilities))
+            self.assertEqual(probabilities, sorted(probabilities, reverse=True))
             self.assertEqual(writer.calls, 1)
             self.assertEqual(len(writer.memories), 5)
             agent.close()

@@ -172,6 +172,12 @@ metadata reports candidate count, whether the selected top five changed, and the
 top selector score. Rollback is removing the optional checkpoint argument; the
 speech gate, threshold, event ledger, and original cosine vectors are unchanged.
 
+Audit schema v2 makes the deployment boundary explicit on every event. It labels
+the gate's best cosine separately from the writer's top selected cosine, reports
+normalized selector weight and margin instead of an uninterpretable raw logit,
+and excludes internal 384-float embeddings from attached JSON. Silent events show
+the answer-aware selector as configured but gated off.
+
 Natural Questions, TriviaQA, and WebQuestions may warm-start factual passage
 retrieval. They are not substitutes for Discord data when learning callbacks,
 relationships, conversation state, or when to remain silent.

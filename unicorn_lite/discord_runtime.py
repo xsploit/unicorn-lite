@@ -66,6 +66,7 @@ def decision_audit_payload(
             "passed_gate": replied,
         },
         "runtime": {
+            "audit_schema_version": 2,
             "writer_provider": (
                 type(agent.writer).__name__ if agent.writer is not None else None
             ),
@@ -78,10 +79,29 @@ def decision_audit_payload(
             "writer_error": result.writer_error,
             "discord_reply_sent": discord_reply_sent,
             "discord_send_error": discord_send_error,
+            "memory_selector": (
+                "answer-aware-v1"
+                if agent.memory_reranker is not None
+                else "cosine-top5"
+            ),
+            "memory_selector_applied": bool(
+                event.metadata.get("memory_reranker", {}).get("applied")
+            ),
+            "memory_candidate_limit": agent.memory_candidate_limit,
         },
         "neural": {"surprise": result.surprise},
         "event_metadata": event.metadata,
-        "retrieved_memories": [asdict(memory) for memory in result.memories],
+        "retrieved_memories": [
+            {
+                "event_id": memory.event_id,
+                "content": memory.content,
+                "actor": memory.actor,
+                "similarity": memory.similarity,
+                "occurred_at": memory.occurred_at,
+                "decision_action": memory.decision_action,
+            }
+            for memory in result.memories
+        ],
         "facts_updated": result.facts_updated,
     }
 
@@ -311,7 +331,9 @@ def run_discord(
                         f"Model: **{payload['runtime']['writer_model'] or 'none'}**\n"
                         f"Writer allowed: **{writer_allowed}**\n"
                         f"Writer called: **{payload['runtime']['writer_attempted']}**\n"
-                        f"Reply sent: **{discord_reply_sent}**"
+                        f"Reply sent: **{discord_reply_sent}**\n"
+                        f"Memory selector: **{payload['runtime']['memory_selector']}** "
+                        f"({'applied' if payload['runtime']['memory_selector_applied'] else 'gated off'})"
                     ),
                     inline=True,
                 )
@@ -339,8 +361,10 @@ def run_discord(
                 embed.add_field(
                     name="Memory",
                     value=(
-                        f"Retrieved: **{len(result.memories)}**\n"
-                        f"Best similarity: **"
+                        f"Writer memories: **{len(result.memories)}**\n"
+                        f"Gate best cosine: **"
+                        f"{float(metadata.get('gate_memory_signals', {}).get('max_memory_similarity', 0)):.3f}**\n"
+                        f"Writer top cosine: **"
                         f"{(result.memories[0].similarity if result.memories else 0):.3f}**\n"
                         f"Answered match: **"
                         f"{float(metadata.get('gate_memory_signals', {}).get('max_answered_similarity', 0)):.3f}**\n"
@@ -358,8 +382,9 @@ def run_discord(
                 )
                 reranker = metadata.get("memory_reranker")
                 if isinstance(reranker, dict) and reranker.get("applied"):
-                    selected_scores = [
-                        float(value) for value in reranker.get("selected_scores", [])
+                    selected_probabilities = [
+                        float(value)
+                        for value in reranker.get("selected_probabilities", [])
                     ]
                     embed.add_field(
                         name="Answer-aware memory",
@@ -367,8 +392,10 @@ def run_discord(
                             f"Candidates: **{int(reranker.get('candidates', 0))}**\n"
                             f"Changed cosine top 5: **"
                             f"{bool(reranker.get('changed_top5'))}**\n"
-                            f"Top selector score: **"
-                            f"{(max(selected_scores) if selected_scores else 0):.3f}**"
+                            f"Top selection weight: **"
+                            f"{(max(selected_probabilities) if selected_probabilities else 0) * 100:.1f}%**\n"
+                            f"Selector margin: **"
+                            f"{float(reranker.get('selector_margin', 0)):.3f}**"
                         ),
                         inline=True,
                     )

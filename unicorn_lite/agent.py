@@ -74,6 +74,8 @@ class UnicornAgent:
         ):
             candidate_vectors = np.stack([hit.embedding for hit in candidates])
             order, scores = self.memory_reranker.rank(embedding, candidate_vectors)
+            normalized = np.exp(scores - float(np.max(scores)))
+            probabilities = normalized / float(np.sum(normalized))
             memories = [candidates[index] for index in order[:5]]
             event.metadata["memory_reranker"] = {
                 "applied": True,
@@ -81,6 +83,14 @@ class UnicornAgent:
                 "cosine_event_ids": [hit.event_id for hit in candidates[:5]],
                 "selected_event_ids": [hit.event_id for hit in memories],
                 "selected_scores": [float(scores[index]) for index in order[:5]],
+                "selected_probabilities": [
+                    float(probabilities[index]) for index in order[:5]
+                ],
+                "selector_margin": (
+                    float(scores[order[0]] - scores[order[1]])
+                    if len(order) > 1
+                    else 0.0
+                ),
                 "changed_top5": [hit.event_id for hit in memories]
                 != [hit.event_id for hit in candidates[:5]],
             }
