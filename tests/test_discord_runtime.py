@@ -8,6 +8,7 @@ import numpy as np
 from unicorn_lite.discord_runtime import (
     audit_delivery_mode,
     decision_audit_payload,
+    is_alias_role_mentioned,
     is_lexically_addressed,
     is_speech_eligible,
 )
@@ -24,6 +25,12 @@ class DiscordRuntimeTests(unittest.TestCase):
         aliases = {"neuro"}
         self.assertFalse(is_lexically_addressed("I was talking about neuro earlier", aliases))
         self.assertFalse(is_lexically_addressed("neurology is interesting", aliases))
+
+    def test_same_named_discord_role_is_an_address_signal(self) -> None:
+        aliases = {"Neuro-sama", "neuro"}
+        self.assertTrue(is_alias_role_mentioned(["Neuro-sama"], aliases))
+        self.assertTrue(is_alias_role_mentioned(["neuro sama"], aliases))
+        self.assertFalse(is_alias_role_mentioned(["AI bots"], aliases))
 
     def test_directed_messages_are_eligible_in_any_channel(self) -> None:
         common = {

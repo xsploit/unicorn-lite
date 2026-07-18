@@ -13,6 +13,10 @@ from .discord_context import DiscordContextTracker
 from .models import Experience
 
 
+def _normalized_alias(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "", value.casefold())
+
+
 def is_lexically_addressed(text: str, aliases: set[str]) -> bool:
     """Detect a name used as an opening vocative without forcing a reply."""
     normalized = re.sub(r"[^a-z0-9]+", " ", text.casefold()).strip()
@@ -31,6 +35,18 @@ def is_lexically_addressed(text: str, aliases: set[str]) -> bool:
         if words[start : start + 1] == [normalized_alias.replace(" ", "")]:
             return True
     return False
+
+
+def is_alias_role_mentioned(role_names: list[str], aliases: set[str]) -> bool:
+    """Treat an explicitly mentioned agent-named role as an address signal.
+
+    Discord user mentions and role mentions are distinct. Servers commonly give
+    an app a same-named mentionable role, so selecting ``@Neuro-sama`` can emit
+    ``<@&role_id>`` rather than the app user's ``<@user_id>``.
+    """
+    normalized_aliases = {_normalized_alias(alias) for alias in aliases}
+    normalized_aliases.discard("")
+    return any(_normalized_alias(name) in normalized_aliases for name in role_names)
 
 
 def is_speech_eligible(
@@ -196,7 +212,6 @@ def run_discord(
         is_agent = message.author.id == client.user.id
         is_bot = bool(message.author.bot)
         direct = isinstance(message.channel, discord.DMChannel)
-        mentioned = client.user in message.mentions
         aliases = {client.user.name, "neuro", "neuro-sama", "neurosama"}
         if message.guild is not None and message.guild.me is not None:
             aliases.add(message.guild.me.display_name)
@@ -205,6 +220,11 @@ def run_discord(
             for value in os.getenv("UNICORN_AGENT_ALIASES", "").split(",")
             if value.strip()
         )
+        user_mentioned = client.user in message.mentions
+        role_mentioned = is_alias_role_mentioned(
+            [role.name for role in message.role_mentions], aliases
+        )
+        mentioned = user_mentioned or role_mentioned
         lexically_addressed = is_lexically_addressed(message.content, aliases)
         reply_to_message_id = (
             str(message.reference.message_id)
@@ -240,6 +260,8 @@ def run_discord(
                 "display_name": message.author.display_name,
                 "discord_message_id": str(message.id),
                 "reply_to_message_id": reply_to_message_id,
+                "user_mentioned": user_mentioned,
+                "role_mentioned": role_mentioned,
             },
         )
         speech_eligible = is_speech_eligible(
