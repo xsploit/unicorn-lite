@@ -1,0 +1,17 @@
+*.db
+*.db-shm
+*.db-wal
+*.pt
+*.npz
+*.zip
+__pycache__/
+.env
+.env.*
+!.env.example
+.venv/
+data/
+vendor/
+neuro-live*.log*
+neuro-runtime.ps1
+.pytest_cache/
+.mypy_cache/
